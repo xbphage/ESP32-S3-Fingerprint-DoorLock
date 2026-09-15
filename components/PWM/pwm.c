@@ -16,7 +16,9 @@ void pwm_init(void)
         .channel = LEDC_CHANNEL_1,
         .duty = 512,
         .flags.output_invert = 0,
-        .gpio_num = GPIO_NUM_8,
+        // ESP32-C3 上 GPIO8 是 strapping 脚，官方 DevKitM-1 还在这上面焊了 RGB LED，
+        // 拿来做 PWM 会一直闪灯，所以舵机信号挪到 GPIO6。
+        .gpio_num = GPIO_NUM_6,
         .hpoint = 0,
         .intr_type = LEDC_INTR_DISABLE,
         .speed_mode = LEDC_LOW_SPEED_MODE,

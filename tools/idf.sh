@@ -15,7 +15,10 @@ import os, subprocess, sys
 
 IDF_PATH     = r"D:\Runtime\Espressif\frameworks\esp-idf-v5.5.5"
 IDF_TOOLS    = r"D:\Runtime\Espressif"
-TOOLCHAIN    = IDF_TOOLS + r"\tools\xtensa-esp-elf\esp-14.2.0_20260121\xtensa-esp-elf\bin"
+# ESP32-C3 是 RISC-V 核，工具链是 riscv32-esp-elf；构建时 IDF 只会挑当前 target
+# 对应的那一个用，所以两个都挂上不冲突。xtensa 那条留给需要回退到 ESP32-S3 的场合。
+TOOLCHAIN_RV = IDF_TOOLS + r"\tools\riscv32-esp-elf\esp-14.2.0_20260121\riscv32-esp-elf\bin"
+TOOLCHAIN_XT = IDF_TOOLS + r"\tools\xtensa-esp-elf\esp-14.2.0_20260121\xtensa-esp-elf\bin"
 NINJA        = IDF_TOOLS + r"\tools\ninja\1.12.1"
 VENV_SCRIPTS = IDF_TOOLS + r"\python_env\idf5.5_py3.11_env\Scripts"
 CCACHE       = IDF_TOOLS + r"\tools\ccache\4.12.1\ccache-4.12.1-windows-x86_64"
@@ -26,7 +29,7 @@ env["IDF_PATH"] = IDF_PATH
 env["IDF_TOOLS_PATH"] = IDF_TOOLS
 env["ESP_ROM_ELF_DIR"] = ROM_ELFS
 env["IDF_PYTHON_ENV_PATH"] = IDF_TOOLS + r"\python_env\idf5.5_py3.11_env"
-for p in (TOOLCHAIN, NINJA, VENV_SCRIPTS, CCACHE):
+for p in (TOOLCHAIN_RV, TOOLCHAIN_XT, NINJA, VENV_SCRIPTS, CCACHE):
     env["PATH"] = p + ";" + env["PATH"]
 
 sys.exit(subprocess.call(

@@ -19,8 +19,10 @@
 #define CharBuffer2 0x02
 
 #define UART_NUM_ID UART_NUM_1
-#define UART_NUM_ID_TX GPIO_NUM_17
-#define UART_NUM_ID_RX GPIO_NUM_18
+// ESP32-C3 上 GPIO12~GPIO17 被内置 SPI flash 独占（CLK/CS/D0~D3），
+// GPIO18/19 是原生 USB 的 D-/D+，所以指纹串口挪到空闲的 GPIO0/GPIO1。
+#define UART_NUM_ID_TX GPIO_NUM_0
+#define UART_NUM_ID_RX GPIO_NUM_1
 const int RX_BUF_SIZE = 1024;  //串口接收缓冲区大小
 
 // ---- 低功耗相关硬件定义 ----------------------------------------------
@@ -30,9 +32,10 @@ const int RX_BUF_SIZE = 1024;  //串口接收缓冲区大小
 #define ID_VCC_GPIO        GPIO_NUM_7
 
 // 模组 TOUCH_OUT（PIN 2）接到 MCU 的哪只脚。
-// 必须满足两个条件：① 是 RTC IO（ESP32-S3 上即 GPIO0~GPIO21），否则不能做
-// Deep-sleep 的 EXT0 唤醒源；② 不与已占用的 7(VCC) / 8(PWM) / 17(TX) / 18(RX) 冲突。
-#define ID_TOUCH_OUT_GPIO  GPIO_NUM_6
+// ESP32-C3 上只有 GPIO0~GPIO5 能做 Deep-sleep 唤醒
+// （SOC_GPIO_DEEP_SLEEP_WAKE_VALID_GPIO_MASK = BIT0|...|BIT5），必须落在这个区间内；
+// 同时避开已占用的 0/1(指纹串口) / 6(PWM) / 7(VCC) / 9(BOOT键) / 20/21(console)。
+#define ID_TOUCH_OUT_GPIO  GPIO_NUM_3
 
 // 模组上电后等待其启动的时间（规格书标称启动时间 < 0.1s，这里留足余量）
 #define ID_POWER_ON_DELAY_MS  300
@@ -95,6 +98,10 @@ class IDENTIFIER
 
     uint32_t IDaddr = 0XFFFFFFFF;
     uint32_t IDpwd = 0x00000000;//口令验证
+
+    // 最近一次 AS608_Check() 的结论。构造函数内部就会握手一次，结果存在这里，
+    // 外面的调用方用 Is_Online() 取，免得为了知道握手成没成再重发一遍指令。
+    bool     m_online = false;
 
     typedef struct  
     {
@@ -166,7 +173,9 @@ class IDENTIFIER
     //按 ID 删除单枚模板（0CH）。成功 true，失败已自行打印原因。
     //Del_FR() 是早期写死"删 ID=1"的演示版，实际要删哪枚请用这个。
     bool Del_FR_ID(uint16_t id);
-    bool AS608_Check(void);//连接检查
+    bool AS608_Check(void);//连接检查。失败会重试，结论同时存进 m_online
+    //最近一次连接检查的结论。构造函数里已经握过手，取值用这个，不必再发一遍指令。
+    bool Is_Online(void) const { return m_online; }
     bool Is_Touch(void);
     uint8_t PS_HandShake(uint32_t *PS_Addr); //与AS608模块握手
     uint8_t PS_Sleep(void);

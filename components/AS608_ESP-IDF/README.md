@@ -1,6 +1,9 @@
 # fingerID —— ZW111 / AS608 指纹模块驱动
 
-组件路径 `components/AS608_ESP-IDF/`，目标芯片 **ESP32-S3**，ESP-IDF **v5.5.5**。
+组件路径 `components/AS608_ESP-IDF/`，目标芯片 **ESP32-C3**，ESP-IDF **v5.5.5**。
+
+> 本组件原先跑在 ESP32-S3 上，已迁移到 ESP32-C3（不再兼容 S3）。引脚分布和深睡唤醒
+> 方式都变了，差异见项目根目录的 [`README.md`](../../README.md) 第 5 节。
 
 协议依据《指纹模组产品用户手册 V1.5.1》，电气与接线依据《ZW111 半导体指纹处理模块规格书 V1.2.2》（两份原文档与转换后的 Markdown 都在仓库 `doc/` 下）。
 
@@ -18,13 +21,13 @@
 
 ## 2. 硬件接线
 
-| 模组引脚 | 接到 ESP32-S3 | 说明 |
+| 模组引脚 | 接到 ESP32-C3 | 说明 |
 |---|---|---|
 | PIN1 `V_SENSOR` | 3.3V（**常供，不受 MCU 控制**） | 触摸检测靠它供电，断了就唤不醒 |
-| PIN2 `TOUCH_OUT` | `GPIO6` | 高电平=活体为真，作 Deep-sleep 唤醒源 |
+| PIN2 `TOUCH_OUT` | `GPIO3` | 高电平=活体为真，作 Deep-sleep 唤醒源 |
 | PIN3 `VCC` | `GPIO7` → 外部开关电路 → 3.3V | MCU 控制模组通断电 |
-| PIN4 `TX` | `GPIO18` | 模组 → MCU |
-| PIN5 `RX` | `GPIO17` | MCU → 模组 |
+| PIN4 `TX` | `GPIO1` | 模组 → MCU |
+| PIN5 `RX` | `GPIO0` | MCU → 模组 |
 | PIN6 `GND` | GND | |
 
 **UART 参数**：`UART_NUM_1`，**57600** bps，8 数据位 / 1 停止位 / 无校验，3.3V TTL。
@@ -48,11 +51,21 @@
 
 | GPIO | 用途 |
 |---|---|
-| 6 | 模组 `TOUCH_OUT`（**必须是 RTC IO，即 GPIO0~21**，否则不能做 Deep-sleep 唤醒源） |
+| 0 / 1 | 模组 RX / TX（`UART_NUM_ID` = UART1） |
+| 3 | 模组 `TOUCH_OUT`（**C3 上只有 GPIO0~GPIO5 能做 Deep-sleep 唤醒**，见下） |
+| 6 | PWM（`components/PWM`，舵机） |
 | 7 | 模组 VCC 控制 |
-| 8 | PWM（`components/PWM`） |
-| 9 | EXTI（`components/EXTI`，当前未被调用） |
-| 17 / 18 | 模组 TX / RX |
+| 9 | BOOT 按键（板载，`main/main.cpp` 里读，用于触发注册） |
+| 20 / 21 | UART0，串口控制台（板载 USB 转串口） |
+
+### ESP32-C3 的引脚约束
+
+C3 可用的引脚比 S3 少得多，上面这几个位置是被硬件限制逼出来的：
+
+- **GPIO11** 是 `VDD_SPI`，**GPIO12~GPIO17** 被内置 SPI flash 的 CLK/CS/D0~D3 独占 —— 一排 7 个脚直接没了。
+- **GPIO18/GPIO19** 是原生 USB 的 D-/D+，所以才把指纹串口挪到 GPIO0/GPIO1。
+- **GPIO2 / GPIO8 / GPIO9** 是 strapping 脚：GPIO9 是 BOOT 键，GPIO8 在官方 DevKitM-1 上还焊着 RGB LED，都不适合做舵机 PWM。
+- **深睡唤醒只有 GPIO0~GPIO5 合法**（`SOC_GPIO_DEEP_SLEEP_WAKE_VALID_GPIO_MASK`），所以 `TOUCH_OUT` 落在 GPIO3。C3 **没有 RTC IO**（`SOC_RTCIO_PIN_COUNT=0`），`SOC_PM_SUPPORT_EXT0_WAKEUP` 也压根没定义，`esp_sleep_enable_ext0_wakeup()` 用不了 —— 深睡唤醒统一走 `esp_deep_sleep_enable_gpio_wakeup()`（见第 6 节）。
 
 ---
 
@@ -81,7 +94,8 @@ if (zw.Auto_Verify(&id, &score)) {
 }
 ```
 
-> `IDENTIFIER` 的构造函数会调 `init_uart2id()` 和 `AS608_Check()`，其中含 `vTaskDelay`，**不要放在中断或定时器回调里构造**。
+> `IDENTIFIER` 的构造函数会调 `init_uart2id()` 和 `AS608_Check()`，后者最长会阻塞约 1.1 秒
+> （3 次重试 × 每次 80ms 等待 + 300ms 收包超时），**不要放在中断或定时器回调里构造**。
 
 ---
 
@@ -91,9 +105,25 @@ if (zw.Auto_Verify(&id, &score)) {
 
 | 函数 | 说明 |
 |---|---|
-| `IDENTIFIER()` | 装 UART 驱动 → 延时 200ms → 握手 `AS608_Check()`。UART 驱动用 `uart_is_driver_installed()` 去重，多次构造不会重复注册 |
+| `IDENTIFIER()` | 装 UART 驱动 → 延时 200ms → 握手 `AS608_Check()`，结果存进 `m_online`。UART 驱动用 `uart_is_driver_installed()` 去重，多次构造不会重复注册 |
 | `~IDENTIFIER()` | 空实现。UART 驱动是进程级共享资源，不随对象析构释放，避免多实例互相破坏 |
-| `bool AS608_Check()` | 连接检查（`13H` 握手）。返回 `false` 表示模块没应答 |
+| `bool AS608_Check()` | 连接检查（`13H` 口令验证），最多重试 3 次。返回 `false` 并已打印失败类别；结论同时写进 `m_online` |
+| `bool Is_Online()` | 取最近一次连接检查的结论。构造函数里已经握过手，**用它取值即可，不必再调 `AS608_Check()` 重发一遍** |
+
+> ⚠️ **构造函数必须在 `ID_PowerOn()` 之后才执行。** 构造函数内部就会握手，模组没上电时那次握手必然失败，
+> 而且会污染 `m_online` —— 之后再调 `Is_Online()` 就分不清"模组真没接"和"对象建早了"。
+> 常见写法是 `static IDENTIFIER zw;` 放在 `ID_PowerOn()` + 延时之后（`app_main` 里就是这么做的）。
+
+`AS608_Check()` 的失败原因是分开报的，三类问题的排查方向完全不同：
+
+| 日志 | 含义 | 排查方向 |
+|---|---|---|
+| `模组无任何应答` | 一个字节都没回来 | 模组是否上电（`ID_VCC_GPIO` 应为高）、TX/RX 是否交叉、波特率是否 57600 |
+| `收到了数据，但没有一帧是合法应答包` | 线路上有字节，但切不出合法包 | 优先查 TX/RX 接反、电平不匹配，其次才是波特率 |
+| `模组有应答，但确认码是 0x??` | 包合法，模块明确拒绝 | 口令（`IDpwd`）不对，或模块处于异常状态 |
+
+判据特意**不是**"缓冲区里有没有字节"：RX 悬空时线路上会拾到工频杂波，那个判据会把根本没接的模组判成已连接。
+所以这里走 `ReadAckPacket()` 做完整的包头 + 长度校验，再按确认码下结论。
 
 ### 4.2 自动注册模板 —— `Auto_Enroll()`
 
@@ -214,7 +244,9 @@ void EnterDeepSleep(void);   // 进入后不再返回
 3. `PS_Sleep()` —— `33H`，模组自身进休眠（静态约 10µA）
 4. `ID_PowerOff()` → `gpio_hold_en(IO7)` → `gpio_deep_sleep_hold_en()`
 5. 把 MCU 的 TX 改成高阻并 hold，避免模组断电后电流从 TX 倒灌进它的 VCC 轨
-6. `esp_sleep_enable_ext0_wakeup(ID_TOUCH_OUT_GPIO, 1)` —— 高电平唤醒
+6. `esp_deep_sleep_enable_gpio_wakeup(1ULL << ID_TOUCH_OUT_GPIO, ESP_GPIO_WAKEUP_GPIO_HIGH)` —— 高电平唤醒。
+   C3 没有 RTC IO，也没有 `EXT0`，只能用这个 API；掩码里只有 GPIO0~GPIO5 合法，越界会返回 `ESP_ERR_INVALID_ARG`。
+   它自己不碰引脚配置，上下拉是 `esp_deep_sleep_start()` 内部按唤醒电平装的（高电平唤醒 ⇒ 内部下拉），所以不触摸时该脚不会被拉高、不会误唤醒
 7. `esp_deep_sleep_start()`
 
 > `gpio_deep_sleep_hold_en()` 不能省：Deep-sleep 时数字域掉电，不 hold 的话 IO7 会浮空，模组可能被重新上电。
@@ -224,7 +256,7 @@ void EnterDeepSleep(void);   // 进入后不再返回
 ```
 esp_sleep_get_wakeup_cause() 判定
   ├─ 冷启动         → 正常初始化 → ZW_Sleep(60) → app_main 返回
-  └─ EXT0 触摸唤醒  → 解除 gpio hold → ID_PowerOn() → 等 300ms
+  └─ GPIO 触摸唤醒  → 解除 gpio hold → ID_PowerOn() → 等 300ms
                     → 构造 IDENTIFIER → PS_LedAuto() 恢复 LED
                     → Auto_Verify() 验证 → 回到 ZW_Sleep(60) → app_main 返回
 ```
@@ -243,7 +275,7 @@ bool Is_Touch(void);   // 轮询 TOUCH_OUT，当前有没有手指按在传感�
 
 > ⚠️ **这个脚必须显式配成输入，否则读回来永远是 0。**
 >
-> 全项目只有 `EnterDeepSleep()` 里的 `esp_sleep_enable_ext0_wakeup()` 碰过 GPIO6，而那条路径只有"准备休眠"时才会走到。冷启动时它还是上电复位状态，而 ESP-IDF 明确规定——
+> 全项目只有 `EnterDeepSleep()` 里的 `esp_deep_sleep_enable_gpio_wakeup()` 碰过 `TOUCH_OUT`，而那条路径只有"准备休眠"时才会走到（何况这个 API 本身并不配置引脚，只登记唤醒源）。冷启动时它还是上电复位状态，而 ESP-IDF 明确规定——
 > `esp_driver_gpio/include/driver/gpio.h:146`：
 > *"If the pad is not configured for input (or input and output) the returned value is always 0."*
 >
@@ -389,7 +421,8 @@ bool Is_Touch(void);   // 轮询 TOUCH_OUT，当前有没有手指按在传感�
 | 宏 | 默认值 | 说明 |
 |---|---|---|
 | `ID_VCC_GPIO` | `GPIO_NUM_7` | 模组 VCC 控制脚 |
-| `ID_TOUCH_OUT_GPIO` | `GPIO_NUM_6` | 触摸唤醒脚，**必须是 RTC IO（GPIO0~21）** |
+| `UART_NUM_ID` / `_TX` / `_RX` | `UART_NUM_1` / `GPIO_NUM_0` / `GPIO_NUM_1` | 指纹模组串口（57600 8N1） |
+| `ID_TOUCH_OUT_GPIO` | `GPIO_NUM_3` | 触摸唤醒脚，**C3 上必须在 GPIO0~GPIO5 之间** |
 | `ID_POWER_ON_DELAY_MS` | `300` | 上电后等模组启动 |
 | `ID_ENROLL_TIMES` | `5` | 自动注册录入次数（手册规定 2~10） |
 | `ID_VERIFY_LEVEL` | `3` | 自动验证分数等级 0~9 |
@@ -436,12 +469,12 @@ app_main
 | 现象 | 排查方向 |
 |---|---|
 | 所有指令都返回 `0xFF` | 模组根本没应答。查三点：**波特率是否 57600**、`GPIO7` 是否已拉高供电、TX/RX 是否交叉接对 |
-| 握手失败 | 同上；另外确认构造函数前调过 `ID_PowerOn()` 并等够了启动时间 |
+| 握手失败 | 看 `AS608_LINK` 那条日志落在上表哪一类，三类原因不一样；另外确认构造 `IDENTIFIER` 之前调过 `ID_PowerOn()` 并等够了启动时间 |
 | 注册返回 `22H` | 该 ID 已有模板。正常情况驱动会自动换下一个 ID；若持续出现，说明索引表位序反了 |
 | 注册返回 `27H` | 这枚指纹已注册过。`Auto_Enroll` 参数位 bit4=1 不允许重复注册，先 `Del_FR_Lib()` 清库 |
 | 注册返回 `1FH` | 指纹库满，删掉不用的模板 |
 | 注册返回 `25H` | 录入次数不在 2~10 范围内 |
-| **首次上电按指纹没反应，但休眠唤醒后正常** | `TOUCH_OUT`(GPIO6) 没配成输入，`gpio_get_level()` 恒返回 0。见 4.5 节⑤ |
+| **首次上电按指纹没反应，但休眠唤醒后正常** | `TOUCH_OUT`(GPIO3) 没配成输入，`gpio_get_level()` 恒返回 0。见 4.5 节⑤ |
 | 一直不休眠 | 检查是否**只有发指令时**才重置倒计时——必须由**收到模组数据**触发；另外确认没有别的任务在持续读串口 |
 | 没到 60 秒就重启 | 多半是 `esp_timer` 任务**栈溢出**（休眠回调整条链路跑在它那份栈上）。看 panic 打印里的任务名是不是 `esp_timer`，是就把 `CONFIG_ESP_TIMER_TASK_STACK_SIZE` 再调大 |
 | 休眠倒计时到点后卡死/重启 | 检查 `IDENTIFIER` 对象是不是 `static` 或堆对象——普通局部变量会随 `app_main` 返回被回收，定时器里的 `&zw` 变野指针 |

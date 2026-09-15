@@ -5,7 +5,7 @@
 //
 // 输入同时监听两路串口，用户插哪根线都能用：
 //   · UART0            —— 板载 USB 转串口芯片那条路，也是 IDF console 的输出口
-//   · USB Serial/JTAG  —— ESP32-S3 原生 USB 口那条路
+//   · USB Serial/JTAG  —— 原生 USB 口那条路（GPIO18/19）
 // 两路都只是"能读到就算数"，谁先来数据用谁，不做优先级。
 
 #include "delete_cli.hpp"
@@ -25,9 +25,10 @@ static const char *CLI_TAG = "AS608_CLI";
 #define CLI_UART_BAUD   115200
 #define CLI_LINE_MAX    40
 
-// ESP32-S3 上 UART0 的默认脚，也正是 IDF console 用的那一对
-#define CLI_UART_TX_GPIO 43
-#define CLI_UART_RX_GPIO 44
+// ESP32-C3 上 UART0 的默认脚（U0TXD/U0RXD），也正是 IDF console 用的那一对，
+// 板上走的就是那颗 USB 转串口芯片。
+#define CLI_UART_TX_GPIO 21
+#define CLI_UART_RX_GPIO 20
 
 // 收到字符后静默这么久，就认为这一行发完了。
 // 存在的理由：不少串口工具（如 VSCode 的 Serial Monitor）点"发送"时不追加 \r\n，

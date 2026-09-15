@@ -1,0 +1,10 @@
+# 项目级配置基线。sdkconfig 被删掉或重新生成时，这里的内容会作为起点。
+# 只写"必须偏离 IDF 默认值"的项，其余一律用默认。
+
+# ESP32-C3 官方 DevKitM-1 是 4MB flash（IDF 对 C3 的默认值是 2MB）
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# PS_Sleep 这个 esp_timer 回调会直接执行完整的 EnterDeepSleep()：
+# 关灯、发模组休眠指令、收应答（JudgeStr 一次最长 500ms）、断 VCC、配置唤醒源。
+# 这些都跑在 esp_timer 服务任务的栈上，默认 3584 字节不够用，会栈溢出。
+CONFIG_ESP_TIMER_TASK_STACK_SIZE=5120

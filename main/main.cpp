@@ -10,7 +10,10 @@
 #include "esp_sleep.h"
 #include "driver/gpio.h"
 
-#define BOOT_BUTTON_GPIO GPIO_NUM_0
+// ESP32-C3 的 BOOT 键是 GPIO9（S3 上才是 GPIO0），低电平有效。
+// 这是 C3 的 strapping 脚之一，上电瞬间被采样决定启动模式，按下即进下载模式，
+// 但作为普通按键输入使用没有问题。
+#define BOOT_BUTTON_GPIO GPIO_NUM_9
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,14 +21,6 @@ extern "C" {
 
 extern "C" void app_main(void)
 {
-    static IDENTIFIER zw;
-    if (!zw.AS608_Check()){
-        ESP_LOGE("main","指纹模块握手失败（检查供电/接线/波特率 57600）");
-    } else {
-        ESP_LOGI("main","指纹模块握手成功");
-    }
-
-
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << BOOT_BUTTON_GPIO),
         .mode = GPIO_MODE_INPUT,
@@ -37,7 +32,9 @@ extern "C" void app_main(void)
     // Deep-sleep 唤醒后芯片是复位重跑的，app_main 会从头再执行一遍，
     // 所以这里必须先看唤醒原因，决定走"冷启动"还是"触摸唤醒"。
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    bool from_touch = (cause == ESP_SLEEP_WAKEUP_EXT0 || cause == ESP_SLEEP_WAKEUP_EXT1);
+    // ESP32-C3 不支持 EXT0/EXT1 唤醒，深睡的 GPIO 唤醒统一报 ESP_SLEEP_WAKEUP_GPIO。
+    // 本项目里 GPIO 唤醒源只有 TOUCH_OUT 一个，所以它等价于"被手指摸醒的"。
+    bool from_touch = (cause == ESP_SLEEP_WAKEUP_GPIO);
 
     if (from_touch){
         ESP_LOGI("main","唤醒原因：TOUCH_OUT 触摸中断");
@@ -57,18 +54,25 @@ extern "C" void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(ID_POWER_ON_DELAY_MS));
 
     pwm_init();
+
     // 必须是 static（或堆）对象，不能是普通局部变量：
     // app_main 末尾不再有 while(1) 撑着，一旦它返回，main task 会被删除、它的栈失效，
     // 而休眠定时器里存的正是 &zw，60 秒后回调再解引用就是野指针。
     // static 把它放进 .bss，一直活到进入 Deep-sleep 芯片复位为止。
-    //static IDENTIFIER zw;
-    ESP_LOGI("main","初始化完成");
+    //
+    // 声明必须放在 ID_PowerOn() 之后：构造函数内部就会握一次手
+    // （init_uart2id() + AS608_Check()），模组还没上电的话这次握手必然失败，
+    // 而且结论会被记进 m_online —— 那样就分不清"模组真没接"和"对象建早了"了。
+    static IDENTIFIER zw;
 
-    if (!zw.AS608_Check()){
-        ESP_LOGE("main","指纹模块握手失败（检查供电/接线/波特率 57600）");
-    } else {
+    // 上面构造时已经握过手了，这里只取结论，不再重发指令。
+    // 失败时 AS608_Check() 已经把排查方向（无应答 / 乱码 / 确认码不对）打出来了。
+    if (zw.Is_Online()){
         ESP_LOGI("main","指纹模块握手成功");
+    } else {
+        ESP_LOGE("main","指纹模块握手失败，功能不可用（检查供电/接线/波特率 57600）");
     }
+    ESP_LOGI("main","初始化完成");
 
     ZW_Sleep(60, zw);
 

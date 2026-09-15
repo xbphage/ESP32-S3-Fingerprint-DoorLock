@@ -11,6 +11,7 @@
 #include "esp_log.h"
 static const char *SLEEP_TAG = "AS608_SLEEP";
 static const char *ENROLL_TAG = "AS608_AUTO";
+static const char *LINK_TAG = "AS608_LINK";
 esp_timer_handle_t sleep_timer = nullptr;
 // 正在执行休眠指令期间置 true。休眠指令自身也会收到模块应答，
 // 若不加这个闸门，应答就会把倒计时重置，模块变成每 60 秒醒一次、睡一次，永远睡不下去。
@@ -142,33 +143,76 @@ void IDENTIFIER::SendCheck(uint16_t check)
 功能描述：模块是否连接检测 
 返回值：模块连接了返回true 否则返回false
 *****************************************/
+// 连接检测的三段时序
+#define AS608_ACK_WAIT_MS     80     // 发完指令先静等这么久，再看线路上有没有字节
+#define AS608_ACK_TIMEOUT_MS  300    // 收一个完整应答包的超时
+#define AS608_CHECK_RETRY     3      // 握手重试次数
+
 bool IDENTIFIER::AS608_Check(void)
 {
-    uart_flush(UART_NUM_ID);
-    SendHead();
-    SendAddr();
-    SendFlag(COMMANDSIGN);
-    SendLength((uint16_t)0x07);
-    Sendcmd((uint8_t)0x13);
-    IDUARTwrite_Bytes(IDpwd);
-    uint16_t sum = 0x07 + 0x13 + IDpwd;
-    SendCheck(sum); 
-    
-    vTaskDelay(200 / portTICK_PERIOD_MS);//等待200ms
-    //PS_GetRandomCode();
-    size_t bufferLenth = 0;
-    ESP_ERROR_CHECK(uart_get_buffered_data_len(UART_NUM_ID, &bufferLenth));
-    if(bufferLenth == 0){
-        #ifdef TEST
-        printf("AS608连接失败\n");
-        #endif  
-        return false;
+    // 用 13H VfyPwd（口令验证）当探针：它是模组上唯一一条不用先采图、发过去就能
+    // 立刻回答的指令，最适合用来回答"模组在不在、这条串口通不通"。
+    //
+    // 判据不能是"缓冲区里有没有字节"。RX 悬空时线路上会拾到工频杂波，那个判据会把
+    // 压根没接的模组判成连上了；反过来，波特率写错（有过把 57600 写成 75600 的先例）
+    // 模组是一个字都不回的。这两种失败要查的东西完全不一样，所以这里交给
+    // ReadAckPacket() 做完整的包头+长度校验，再按确认码下结论。
+    uint8_t ack        = 0xff;
+    bool    got_packet = false;
+    bool    saw_bytes  = false;   // 这一次尝试里，线路上到底有没有出现过数据
+
+    for (int attempt = 1; attempt <= AS608_CHECK_RETRY; attempt++)
+    {
+        uart_flush(UART_NUM_ID);    // 清掉上一轮残留，免得把旧应答当成这一轮的
+        SendHead();
+        SendAddr();
+        SendFlag(COMMANDSIGN);
+        SendLength((uint16_t)0x07);
+        Sendcmd((uint8_t)0x13);
+        IDUARTwrite_Bytes(IDpwd);
+        uint16_t sum = 0x07 + 0x13 + IDpwd;     // = 0x1A（口令是 4 个 0 字节）
+        SendCheck(sum);
+
+        vTaskDelay(pdMS_TO_TICKS(AS608_ACK_WAIT_MS));
+        size_t pending = 0;
+        if (uart_get_buffered_data_len(UART_NUM_ID, &pending) == ESP_OK && pending > 0)
+            saw_bytes = true;
+
+        AckPacket pkt;
+        got_packet = ReadAckPacket(&pkt, AS608_ACK_TIMEOUT_MS);
+        ack = got_packet ? pkt.ack : 0xff;
+
+        if (got_packet && ack == 0x00)
+        {
+            m_online = true;
+            ESP_LOGI(LINK_TAG, "握手成功：13H 应答确认码 0x00（第 %d/%d 次尝试）",
+                     attempt, AS608_CHECK_RETRY);
+            return true;
+        }
+
+        if (attempt < AS608_CHECK_RETRY)
+        {
+            ESP_LOGW(LINK_TAG, "握手第 %d/%d 次失败（%s），重试",
+                     attempt, AS608_CHECK_RETRY,
+                     got_packet ? "确认码非 0x00" : "没收到合法应答包");
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
     }
-    #ifdef TEST
-        printf("AS608连接成功\n");
-    #endif
-    TouchSleepTimer(*this);               // 收到模块数据，推迟休眠
-    return true;
+
+    m_online = false;
+
+    // 失败原因分开报。三类问题的排查方向完全不同，只丢一句"握手失败"等于没报。
+    if (got_packet)
+        ESP_LOGE(LINK_TAG, "握手失败：模组有应答，但确认码是 0x%02X（0x00 才算成功）",
+                 (unsigned)ack);
+    else if (saw_bytes)
+        ESP_LOGE(LINK_TAG, "握手失败：收到了数据，但没有一帧是合法应答包。"
+                 "优先查 TX/RX 是否接反、电平是否匹配，其次才是波特率");
+    else
+        ESP_LOGE(LINK_TAG, "握手失败：模组无任何应答。查模组是否已上电"
+                 "（ID_VCC_GPIO=%d 应为高电平）、TX/RX 是否交叉、波特率是否 57600",
+                 (int)ID_VCC_GPIO);
+    return false;
 }
 
 uint8_t* IDENTIFIER::JudgeStr()
@@ -1620,10 +1664,18 @@ void IDENTIFIER::EnterDeepSleep(void)
     gpio_hold_en(UART_NUM_ID_TX);
 
     // 5) 配置 TOUCH_OUT 为唤醒源。模组的 V_SENSOR(PIN1) 必须常供电，
-    //    手指触摸时 TOUCH_OUT 输出高电平，把 ESP32-S3 从 Deep-sleep 拉起来。
-    //    ESP_ERR_CHECK 会顺带把该脚按 RTC IO 初始化，并使能反向的 RTC 上下拉，
-    //    保证没有触摸时该脚被拉低、不会误唤醒。
-    ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(ID_TOUCH_OUT_GPIO, 1));
+    //    手指触摸时 TOUCH_OUT 输出高电平，把 ESP32-C3 从 Deep-sleep 拉起来。
+    //
+    //    这里用的是 GPIO 唤醒而不是 EXT0：ESP32-C3 没有 RTC IO
+    //    （SOC_RTCIO_PIN_COUNT = 0），SOC_PM_SUPPORT_EXT0_WAKEUP 也压根没定义，
+    //    esp_sleep_enable_ext0_wakeup() 在 C3 上不可用。
+    //    掩码里只有 GPIO0~GPIO5 合法，越界会返回 ESP_ERR_INVALID_ARG。
+    //
+    //    该 API 自己不碰引脚配置，真正的上下拉是 esp_deep_sleep_start() 内部按唤醒
+    //    电平装的（ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS 默认开）——高电平唤醒
+    //    对应内部下拉，所以没有触摸时这个脚不会被拉高、不会误唤醒。
+    ESP_ERROR_CHECK(esp_deep_sleep_enable_gpio_wakeup(1ULL << ID_TOUCH_OUT_GPIO,
+                                                      ESP_GPIO_WAKEUP_GPIO_HIGH));
     ESP_LOGI(SLEEP_TAG, "已配置 TOUCH_OUT(GPIO%d) 高电平唤醒，即将进入 Deep-sleep",
              (int)ID_TOUCH_OUT_GPIO);
 
@@ -1633,7 +1685,8 @@ void IDENTIFIER::EnterDeepSleep(void)
 // 轮询 TOUCH_OUT，判断当前有没有手指按在传感器上（高电平=活体检测为真）。
 //
 // 这里的一次性 GPIO 配置不能省：全项目只有 EnterDeepSleep() 里的
-// esp_sleep_enable_ext0_wakeup() 碰过这个脚，而那条路径只有"准备休眠"时才会走到。
+// esp_deep_sleep_enable_gpio_wakeup() 碰过这个脚，而那个 API 明确写了
+// "does not modify pin configuration"，且那条路径只有"准备休眠"时才会走到。
 // 冷启动时它还是上电复位状态，而 ESP-IDF 明确规定——pad 没有配置成输入时
 // gpio_get_level() 恒返回 0。结果就是首次上电后主循环永远看不到触摸，
 // 表现为"按指纹没反应"；而触摸唤醒那条路走的是 from_touch 分支直接调
