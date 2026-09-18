@@ -74,7 +74,7 @@ extern "C" void app_main(void)
     }
     ESP_LOGI("main","初始化完成");
 
-    ZW_Sleep(60, zw);
+    ZW_Sleep(7, zw);
 
     zw.PS_LedAuto();
     uint16_t matchID = 0, score = 0;
