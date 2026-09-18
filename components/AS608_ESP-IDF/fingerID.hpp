@@ -3,7 +3,6 @@
 #pragma once
 
 //#define TEST
-#include "sdkconfig.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -12,6 +11,8 @@
 #include "esp_sleep.h"
 #include "soc\gpio_num.h"
 #include "esp_timer.h"
+#include <portmacro.h>
+#include "esp_log.h"
 
 #define PACKHEAD ((uint16_t)0xEF01) //通信包头
 #define COMMANDSIGN ((uint8_t)0x01) //命令包标识
@@ -160,7 +161,7 @@ class IDENTIFIER
     // ---- 以下 2 个已被 Auto_Enroll / Auto_Verify 取代，实现整段注释，需要时恢复 ----
     // void Add_FR(void);          //手动注册（按两次手指）  -> 改 Auto_Enroll()
     // bool press_FR(uint32_t timeout_ms = ID_IDENTIFY_TIMEOUT_MS);  //手动验证循环 -> 改 Auto_Verify()
-
+    void ID_SetSleepTime(uint8_t val);//设置休眠时间
     void Del_FR(void);
     void Del_FR_Lib(void);
     //按 ID 删除单枚模板（0CH）。成功 true，失败已自行打印原因。
@@ -198,5 +199,6 @@ class IDENTIFIER
 // 倒计时到点后由定时器回调直接调 EnterDeepSleep()，函数不返回、芯片复位重跑。
 // 每次收到模组数据（JudgeStr / ReadAckPacket）都会调它把倒计时往后推。
 void ZW_Sleep(uint8_t t, IDENTIFIER &zw);
+
 
 #endif

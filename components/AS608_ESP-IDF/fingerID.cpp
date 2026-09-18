@@ -7,20 +7,20 @@
 ********************************************************************************/
 
 #include "fingerID.hpp"
-#include <portmacro.h>
-#include "esp_log.h"
+
 static const char *SLEEP_TAG = "AS608_SLEEP";
 static const char *ENROLL_TAG = "AS608_AUTO";
 esp_timer_handle_t sleep_timer = nullptr;
 // 正在执行休眠指令期间置 true。休眠指令自身也会收到模块应答，
 // 若不加这个闸门，应答就会把倒计时重置，模块变成每 60 秒醒一次、睡一次，永远睡不下去。
 static bool s_sending_sleep = false;
+uint8_t sleep_time = -1;
 
 // 收到模块数据后调用：把"60 秒收不到数据就休眠"的倒计时往后推。
-static void TouchSleepTimer(IDENTIFIER &id)
+static void TouchSleepTimer(IDENTIFIER &id,uint8_t time)
 {
     if (!s_sending_sleep){
-        ZW_Sleep(7, id);
+        ZW_Sleep(time, id);
     }
 }
 
@@ -78,6 +78,11 @@ void IDENTIFIER::init_uart2id(void){
         ESP_ERROR_CHECK(uart_set_pin(UART_NUM_ID, UART_NUM_ID_TX, UART_NUM_ID_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
         ESP_ERROR_CHECK(uart_driver_install(UART_NUM_ID, RX_BUF_SIZE * 2, 0, 0, NULL, 0));
     };
+}
+
+void IDENTIFIER::ID_SetSleepTime(uint8_t val)
+{
+    sleep_time = val;
 }
 
 void IDENTIFIER::IDUARTwrite_Bytes(uint8_t data)
@@ -167,7 +172,7 @@ bool IDENTIFIER::AS608_Check(void)
     #ifdef TEST
         printf("AS608连接成功\n");
     #endif
-    TouchSleepTimer(*this);               // 收到模块数据，推迟休眠
+    TouchSleepTimer(*this,sleep_time);               // 收到模块数据，推迟休眠
     return true;
 }
 
@@ -194,7 +199,7 @@ uint8_t* IDENTIFIER::JudgeStr()
 
     if (uartSize > 0){
         uart_read_bytes(UART_NUM_ID, receive, uartSize, 500 / portTICK_PERIOD_MS);
-        TouchSleepTimer(*this);           // 收到模块数据，推迟休眠
+        TouchSleepTimer(*this,sleep_time);           // 收到模块数据，推迟休眠
     }
     receive[uartSize] = '\0';             // 保证 strstr 安全
 
@@ -689,7 +694,7 @@ uint8_t IDENTIFIER::PS_HandShake(uint32_t *PS_Addr)
         {
         *PS_Addr = (data[2] << 24) + (data[3] << 16)
                     + (data[4] << 8) + (data[5]);
-        TouchSleepTimer(*this);           // 收到模块数据，推迟休眠
+        TouchSleepTimer(*this,sleep_time);           // 收到模块数据，推迟休眠
         return 0;
         }
     }
@@ -1169,7 +1174,7 @@ bool IDENTIFIER::ReadAckPacket(AckPacket *pkt, uint32_t timeout_ms)
     if (uart_read_bytes(UART_NUM_ID, pkt->param, plen, pdMS_TO_TICKS(500)) != (int)plen)
         return false;
 
-    TouchSleepTimer(*this);             // 收到模块数据，推迟休眠
+    TouchSleepTimer(*this,sleep_time);             // 收到模块数据，推迟休眠
 
     // param[] 里现在装的是 [确认码, 参数..., 校验和2]，
     // 把确认码取出来、参数区整体前移一位，后面调用方就只管参数了。

@@ -14,6 +14,6 @@ void set_angle(uint16_t angle){
 
 void open_door(void){
     set_angle(180);
-    vTaskDelay(5000);
+    vTaskDelay(pdMS_TO_TICKS(5000));
     set_angle(0);
 }

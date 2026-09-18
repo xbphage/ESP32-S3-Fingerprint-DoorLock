@@ -9,8 +9,7 @@
 #include "esp_timer.h"
 #include "esp_sleep.h"
 #include "driver/gpio.h"
-
-#define BOOT_BUTTON_GPIO GPIO_NUM_0
+#include "main.hpp"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +18,7 @@ extern "C" {
 extern "C" void app_main(void)
 {
     static IDENTIFIER zw;
+    zw.ID_SetSleepTime(SLEEP_TIME);
     if (!zw.AS608_Check()){
         ESP_LOGE("main","指纹模块握手失败（检查供电/接线/波特率 57600）");
     } else {
@@ -69,8 +69,8 @@ extern "C" void app_main(void)
     } else {
         ESP_LOGI("main","指纹模块握手成功");
     }
-
-    ZW_Sleep(7, zw);
+    set_angle(0);
+    ZW_Sleep(SLEEP_TIME, zw);
 
     zw.PS_LedAuto();
     uint16_t matchID = 0, score = 0;
@@ -84,7 +84,9 @@ extern "C" void app_main(void)
             if (zw.Auto_Verify(&matchID, &score)){
                 ESP_LOGI("main","指纹识别成功，ID=%u 得分=%u",
                             (unsigned)matchID, (unsigned)score);
+                ZW_Sleep(-1,zw);
                 open_door();
+                ZW_Sleep(SLEEP_TIME,zw);
             } else {
                 ESP_LOGI("main","未识别到指纹");
             }
