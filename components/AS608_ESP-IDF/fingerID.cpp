@@ -20,7 +20,7 @@ static bool s_sending_sleep = false;
 static void TouchSleepTimer(IDENTIFIER &id)
 {
     if (!s_sending_sleep){
-        ZW_Sleep(60, id);
+        ZW_Sleep(7, id);
     }
 }
 
